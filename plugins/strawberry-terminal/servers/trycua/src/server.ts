@@ -1,0 +1,928 @@
+#!/usr/bin/env node
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  Tool,
+  TextContent,
+  ImageContent,
+} from '@modelcontextprotocol/sdk/types.js';
+import { VMManager } from './vm-manager.js';
+import { VMConfig, ComputerAction, OSType } from './types.js';
+import * as fs from 'fs';
+
+const VERSION = '0.1.0';
+const MCP_EVENTS_FILE = '/tmp/bat-mcp-events.jsonl';
+const VM_STATUS_FILE = '/tmp/bat-vm-status.json';
+
+/**
+ * Write event for sidebar tracking
+ */
+function writeEvent(event: Record<string, unknown>): void {
+  try {
+    const line = JSON.stringify({ ...event, timestamp: new Date().toISOString() }) + '\n';
+    fs.appendFileSync(MCP_EVENTS_FILE, line);
+  } catch {
+    // Ignore errors
+  }
+}
+
+/**
+ * Update VM status file for sidebar
+ */
+function updateVMStatus(vmManager: VMManager): void {
+  try {
+    const vms = vmManager.getAll().map(vm => ({
+      id: vm.id,
+      name: vm.name,
+      status: vm.status,
+      osType: vm.osType,
+      tags: vm.tags,
+      createdAt: vm.createdAt.toISOString(),
+    }));
+    fs.writeFileSync(VM_STATUS_FILE, JSON.stringify({ vms, lastUpdate: new Date().toISOString() }, null, 2));
+  } catch {
+    // Ignore errors
+  }
+}
+
+/**
+ * TryCua MCP Server
+ *
+ * This MCP server exposes TryCua VM management as tools that Claude Code can use.
+ * It enables Claude Code to:
+ * 1. Spawn VMs
+ * 2. Execute tasks on VMs using computer use
+ * 3. Take screenshots
+ * 4. Perform mouse/keyboard actions
+ * 5. Manage VM lifecycle
+ */
+class TryCuaMCPServer {
+  private server: Server;
+  private vmManager: VMManager;
+
+  constructor() {
+    this.vmManager = new VMManager(10);
+
+    this.server = new Server(
+      {
+        name: 'trycua-mcp',
+        version: VERSION,
+      },
+      {
+        capabilities: {
+          tools: {},
+          resources: {},
+        },
+      }
+    );
+
+    this.setupToolHandlers();
+    this.setupResourceHandlers();
+    this.setupVMEventForwarding();
+  }
+
+  private setupToolHandlers(): void {
+    // List available tools
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+      const tools: Tool[] = [
+        {
+          name: 'spawn_vm',
+          description:
+            'Spawn a new REAL Windows/macOS/Linux VM in the cloud. Returns the VM ID for subsequent operations. VMs are provisioned via TryCua Cloud and take ~10-30 seconds to be ready.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              name: {
+                type: 'string',
+                description: 'Name for the VM (for identification)',
+              },
+              os_type: {
+                type: 'string',
+                enum: ['windows', 'macos', 'linux'],
+                description: 'Operating system type (default: windows)',
+              },
+              region: {
+                type: 'string',
+                enum: ['north-america', 'europe', 'asia-pacific', 'south-america'],
+                description: 'Cloud region for the VM (default: north-america)',
+              },
+              size: {
+                type: 'string',
+                enum: ['small', 'medium', 'large'],
+                description: 'VM size/resources (default: small)',
+              },
+              tags: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Tags for categorizing VMs (e.g., ["strawberry-browser", "production"])',
+              },
+            },
+            required: ['name'],
+          },
+        },
+        {
+          name: 'execute_task',
+          description:
+            'Execute a task on a VM using computer use. The task will be interpreted and executed using mouse/keyboard actions.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vm_id: {
+                type: 'string',
+                description: 'The VM ID to execute the task on',
+              },
+              task: {
+                type: 'string',
+                description:
+                  'The task to execute (e.g., "Open Chrome and search for AI news")',
+              },
+            },
+            required: ['vm_id', 'task'],
+          },
+        },
+        {
+          name: 'computer_action',
+          description:
+            'Perform a specific computer action (click, type, scroll, key press) on a VM',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vm_id: {
+                type: 'string',
+                description: 'The VM ID',
+              },
+              action: {
+                type: 'string',
+                enum: ['click', 'type', 'scroll', 'key', 'move', 'screenshot'],
+                description: 'The type of action',
+              },
+              x: {
+                type: 'number',
+                description: 'X coordinate (for click/move)',
+              },
+              y: {
+                type: 'number',
+                description: 'Y coordinate (for click/move)',
+              },
+              text: {
+                type: 'string',
+                description: 'Text to type (for type action)',
+              },
+              button: {
+                type: 'string',
+                enum: ['left', 'right', 'middle'],
+                description: 'Mouse button (for click)',
+              },
+              key: {
+                type: 'string',
+                description: 'Key to press (for key action, e.g., "Enter", "Tab")',
+              },
+              direction: {
+                type: 'string',
+                enum: ['up', 'down'],
+                description: 'Scroll direction',
+              },
+              amount: {
+                type: 'number',
+                description: 'Scroll amount in pixels',
+              },
+            },
+            required: ['vm_id', 'action'],
+          },
+        },
+        {
+          name: 'get_screenshot',
+          description: 'Get the current screenshot from a VM',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vm_id: {
+                type: 'string',
+                description: 'The VM ID',
+              },
+            },
+            required: ['vm_id'],
+          },
+        },
+        {
+          name: 'stop_vm',
+          description: 'Stop a running VM',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vm_id: {
+                type: 'string',
+                description: 'The VM ID to stop',
+              },
+            },
+            required: ['vm_id'],
+          },
+        },
+        {
+          name: 'list_vms',
+          description: 'List all VMs and their current status',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'get_pool_status',
+          description: 'Get the status of the VM pool (total, working, idle, etc.)',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'find_vms_by_tag',
+          description: 'Find all VMs with a specific tag. Useful for managing groups of VMs like "strawberry-browser" or "claude-cowork".',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              tag: {
+                type: 'string',
+                description: 'Tag to search for (e.g., "strawberry-browser")',
+              },
+            },
+            required: ['tag'],
+          },
+        },
+        {
+          name: 'execute_on_tagged_vms',
+          description: 'Execute a task on all VMs with a specific tag. Useful for running the same task across all browser VMs or cowork instances.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              tag: {
+                type: 'string',
+                description: 'Tag to filter VMs by',
+              },
+              task: {
+                type: 'string',
+                description: 'Task to execute on all matching VMs',
+              },
+            },
+            required: ['tag', 'task'],
+          },
+        },
+        {
+          name: 'add_vm_tags',
+          description: 'Add tags to an existing VM',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vm_id: {
+                type: 'string',
+                description: 'The VM ID',
+              },
+              tags: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Tags to add',
+              },
+            },
+            required: ['vm_id', 'tags'],
+          },
+        },
+        {
+          name: 'remove_vm_tags',
+          description: 'Remove tags from an existing VM',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vm_id: {
+                type: 'string',
+                description: 'The VM ID',
+              },
+              tags: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Tags to remove',
+              },
+            },
+            required: ['vm_id', 'tags'],
+          },
+        },
+        {
+          name: 'list_all_tags',
+          description: 'List all unique tags across all VMs',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+      ];
+
+      return { tools };
+    });
+
+    // Handle tool calls
+    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const { name, arguments: args } = request.params;
+
+      try {
+        switch (name) {
+          case 'spawn_vm': {
+            const config: VMConfig = {
+              name: args?.name as string,
+              osType: (args?.os_type as OSType) || 'windows', // Default to Windows
+              region: (args?.region as VMConfig['region']) || 'north-america',
+              size: (args?.size as VMConfig['size']) || 'small',
+              tags: (args?.tags as string[]) || [],
+              setupChrome: args?.setup_chrome !== false,
+              installClaudeExtension: args?.install_claude_extension === true,
+            };
+
+            // Write event for sidebar tracking
+            writeEvent({ type: 'spawn_vm', vm_name: config.name, os_type: config.osType, status: 'spawning' });
+
+            const vm = await this.vmManager.spawn(config);
+
+            // Update status after spawn
+            writeEvent({ type: 'spawn_vm', vm_id: vm.id, vm_name: vm.name, os_type: vm.osType, status: vm.status });
+            updateVMStatus(this.vmManager);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    {
+                      success: true,
+                      vm_id: vm.id,
+                      name: vm.name,
+                      status: vm.status,
+                      os_type: vm.osType,
+                      tags: vm.tags,
+                      message: `VM "${vm.name}" spawned successfully. Use vm_id "${vm.id}" for subsequent operations.`,
+                    },
+                    null,
+                    2
+                  ),
+                } as TextContent,
+              ],
+            };
+          }
+
+          case 'execute_task': {
+            const vmId = args?.vm_id as string;
+            const task = args?.task as string;
+
+            // Write event for sidebar - task started
+            writeEvent({ type: 'task', vm_id: vmId, action: 'start', data: task.slice(0, 100) });
+
+            const result = await this.vmManager.executeTask(vmId, task);
+
+            // Write event - task complete
+            writeEvent({ type: 'task', vm_id: vmId, action: result.success ? 'complete' : 'error', data: result.output?.slice(0, 100), error: result.error });
+            updateVMStatus(this.vmManager);
+
+            const content: (TextContent | ImageContent)[] = [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    success: result.success,
+                    output: result.output,
+                    duration_ms: result.duration,
+                    error: result.error,
+                  },
+                  null,
+                  2
+                ),
+              } as TextContent,
+            ];
+
+            // Include latest screenshot if available
+            if (result.screenshots.length > 0) {
+              const lastScreenshot = result.screenshots[result.screenshots.length - 1];
+              if (lastScreenshot.imageB64) {
+                content.push({
+                  type: 'image',
+                  data: lastScreenshot.imageB64,
+                  mimeType: 'image/png',
+                } as ImageContent);
+
+                // Write screenshot event
+                writeEvent({ type: 'screenshot', vm_id: vmId, data: 'Screenshot captured' });
+              }
+            }
+
+            return { content };
+          }
+
+          case 'computer_action': {
+            const vmId = args?.vm_id as string;
+            const action: ComputerAction = {
+              type: args?.action as ComputerAction['type'],
+              x: args?.x as number | undefined,
+              y: args?.y as number | undefined,
+              text: args?.text as string | undefined,
+              button: args?.button as ComputerAction['button'],
+              key: args?.key as string | undefined,
+              direction: args?.direction as ComputerAction['direction'],
+              amount: args?.amount as number | undefined,
+            };
+
+            // Write event for sidebar - action performed
+            const actionDesc = action.type === 'click' ? `click(${action.x},${action.y})` :
+                               action.type === 'type' ? `type("${action.text?.slice(0, 20)}...")` :
+                               action.type === 'key' ? `key(${action.key})` :
+                               action.type;
+            writeEvent({ type: 'action', vm_id: vmId, action: actionDesc });
+
+            const screenshot = await this.vmManager.executeAction(vmId, action);
+
+            // Write screenshot event
+            if (screenshot.imageB64) {
+              writeEvent({ type: 'screenshot', vm_id: vmId, data: screenshot.lastAction });
+            }
+            updateVMStatus(this.vmManager);
+
+            const content: (TextContent | ImageContent)[] = [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    success: true,
+                    action: screenshot.lastAction,
+                    timestamp: screenshot.timestamp.toISOString(),
+                  },
+                  null,
+                  2
+                ),
+              } as TextContent,
+            ];
+
+            if (screenshot.imageB64) {
+              content.push({
+                type: 'image',
+                data: screenshot.imageB64,
+                mimeType: 'image/png',
+              } as ImageContent);
+            }
+
+            return { content };
+          }
+
+          case 'get_screenshot': {
+            const vmId = args?.vm_id as string;
+            const screenshot = await this.vmManager.getScreenshot(vmId);
+
+            // Write screenshot event for sidebar
+            writeEvent({ type: 'screenshot', vm_id: vmId, data: screenshot.lastAction || 'screenshot' });
+
+            const content: (TextContent | ImageContent)[] = [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    vm_id: vmId,
+                    timestamp: screenshot.timestamp.toISOString(),
+                    reasoning: screenshot.reasoning,
+                    last_action: screenshot.lastAction,
+                  },
+                  null,
+                  2
+                ),
+              } as TextContent,
+            ];
+
+            if (screenshot.imageB64) {
+              content.push({
+                type: 'image',
+                data: screenshot.imageB64,
+                mimeType: 'image/png',
+              } as ImageContent);
+            }
+
+            return { content };
+          }
+
+          case 'stop_vm': {
+            const vmId = args?.vm_id as string;
+
+            // Write event for sidebar
+            writeEvent({ type: 'stop_vm', vm_id: vmId, status: 'stopping' });
+
+            await this.vmManager.stop(vmId);
+
+            // Write final event and update status
+            writeEvent({ type: 'stop_vm', vm_id: vmId, status: 'stopped' });
+            updateVMStatus(this.vmManager);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    {
+                      success: true,
+                      message: `VM ${vmId} stopped`,
+                    },
+                    null,
+                    2
+                  ),
+                } as TextContent,
+              ],
+            };
+          }
+
+          case 'list_vms': {
+            const vms = this.vmManager.getAll();
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    {
+                      count: vms.length,
+                      vms: vms.map((vm) => ({
+                        id: vm.id,
+                        name: vm.name,
+                        status: vm.status,
+                        os_type: vm.osType,
+                        tags: vm.tags,
+                        created_at: vm.createdAt.toISOString(),
+                        current_task: vm.currentTask,
+                      })),
+                    },
+                    null,
+                    2
+                  ),
+                } as TextContent,
+              ],
+            };
+          }
+
+          case 'get_pool_status': {
+            const status = this.vmManager.getPoolStatus();
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(status, null, 2),
+                } as TextContent,
+              ],
+            };
+          }
+
+          case 'find_vms_by_tag': {
+            const tag = args?.tag as string;
+            const vms = this.vmManager.getByTag(tag);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    {
+                      tag,
+                      count: vms.length,
+                      vms: vms.map((vm) => ({
+                        id: vm.id,
+                        name: vm.name,
+                        status: vm.status,
+                        os_type: vm.osType,
+                        tags: vm.tags,
+                        created_at: vm.createdAt.toISOString(),
+                        current_task: vm.currentTask,
+                      })),
+                    },
+                    null,
+                    2
+                  ),
+                } as TextContent,
+              ],
+            };
+          }
+
+          case 'execute_on_tagged_vms': {
+            const tag = args?.tag as string;
+            const task = args?.task as string;
+            const vms = this.vmManager.getByTag(tag);
+
+            if (vms.length === 0) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify(
+                      {
+                        success: false,
+                        tag,
+                        error: `No VMs found with tag "${tag}"`,
+                      },
+                      null,
+                      2
+                    ),
+                  } as TextContent,
+                ],
+              };
+            }
+
+            // Write event for sidebar - batch task started
+            writeEvent({ type: 'batch_task', tag, action: 'start', vm_count: vms.length, data: task.slice(0, 100) });
+
+            // Execute task on all matching VMs in parallel
+            const results = await Promise.allSettled(
+              vms.map(async (vm) => {
+                try {
+                  const result = await this.vmManager.executeTask(vm.id, task);
+                  return { vm_id: vm.id, name: vm.name, ...result };
+                } catch (error) {
+                  return {
+                    vm_id: vm.id,
+                    name: vm.name,
+                    success: false,
+                    error: error instanceof Error ? error.message : String(error),
+                  };
+                }
+              })
+            );
+
+            const taskResults = results.map((r) =>
+              r.status === 'fulfilled' ? r.value : { success: false, error: 'Promise rejected' }
+            );
+
+            // Write event - batch task complete
+            const successCount = taskResults.filter((r) => r.success).length;
+            writeEvent({ type: 'batch_task', tag, action: 'complete', success_count: successCount, total: vms.length });
+            updateVMStatus(this.vmManager);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    {
+                      success: true,
+                      tag,
+                      task,
+                      total_vms: vms.length,
+                      successful: successCount,
+                      failed: vms.length - successCount,
+                      results: taskResults,
+                    },
+                    null,
+                    2
+                  ),
+                } as TextContent,
+              ],
+            };
+          }
+
+          case 'add_vm_tags': {
+            const vmId = args?.vm_id as string;
+            const tags = args?.tags as string[];
+
+            const vm = this.vmManager.addTags(vmId, tags);
+
+            if (!vm) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify(
+                      {
+                        success: false,
+                        error: `VM ${vmId} not found`,
+                      },
+                      null,
+                      2
+                    ),
+                  } as TextContent,
+                ],
+                isError: true,
+              };
+            }
+
+            // Write event for sidebar
+            writeEvent({ type: 'vm_tags', vm_id: vmId, action: 'add', tags });
+            updateVMStatus(this.vmManager);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    {
+                      success: true,
+                      vm_id: vmId,
+                      tags: vm.tags,
+                      message: `Tags added to VM ${vmId}`,
+                    },
+                    null,
+                    2
+                  ),
+                } as TextContent,
+              ],
+            };
+          }
+
+          case 'remove_vm_tags': {
+            const vmId = args?.vm_id as string;
+            const tags = args?.tags as string[];
+
+            const vm = this.vmManager.removeTags(vmId, tags);
+
+            if (!vm) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify(
+                      {
+                        success: false,
+                        error: `VM ${vmId} not found`,
+                      },
+                      null,
+                      2
+                    ),
+                  } as TextContent,
+                ],
+                isError: true,
+              };
+            }
+
+            // Write event for sidebar
+            writeEvent({ type: 'vm_tags', vm_id: vmId, action: 'remove', tags });
+            updateVMStatus(this.vmManager);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    {
+                      success: true,
+                      vm_id: vmId,
+                      tags: vm.tags,
+                      message: `Tags removed from VM ${vmId}`,
+                    },
+                    null,
+                    2
+                  ),
+                } as TextContent,
+              ],
+            };
+          }
+
+          case 'list_all_tags': {
+            const tags = this.vmManager.getAllTags();
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    {
+                      count: tags.length,
+                      tags,
+                    },
+                    null,
+                    2
+                  ),
+                } as TextContent,
+              ],
+            };
+          }
+
+          default:
+            throw new Error(`Unknown tool: ${name}`);
+        }
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: false,
+                  error: error instanceof Error ? error.message : String(error),
+                },
+                null,
+                2
+              ),
+            } as TextContent,
+          ],
+          isError: true,
+        };
+      }
+    });
+  }
+
+  private setupResourceHandlers(): void {
+    // List resources (VMs as resources)
+    this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
+      const vms = this.vmManager.getAll();
+
+      return {
+        resources: vms.map((vm) => ({
+          uri: `vm://${vm.id}`,
+          name: vm.name,
+          description: `TryCua VM: ${vm.name} (${vm.status})`,
+          mimeType: 'application/json',
+        })),
+      };
+    });
+
+    // Read a VM resource
+    this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+      const uri = request.params.uri;
+      const vmId = uri.replace('vm://', '');
+      const vm = this.vmManager.get(vmId);
+
+      if (!vm) {
+        throw new Error(`VM not found: ${vmId}`);
+      }
+
+      return {
+        contents: [
+          {
+            uri,
+            mimeType: 'application/json',
+            text: JSON.stringify(
+              {
+                id: vm.id,
+                name: vm.name,
+                status: vm.status,
+                os_type: vm.osType,
+                created_at: vm.createdAt.toISOString(),
+                last_activity: vm.lastActivity?.toISOString(),
+                current_task: vm.currentTask,
+                reasoning: vm.reasoning,
+                last_action: vm.lastAction,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    });
+  }
+
+  private setupVMEventForwarding(): void {
+    // Forward VM events as server notifications
+    this.vmManager.on('vm_created', (data) => {
+      // In a full implementation, we would send notifications
+      console.error(`[TryCua] VM created: ${data.name} (${data.vmId})`);
+    });
+
+    this.vmManager.on('vm_ready', (data) => {
+      console.error(`[TryCua] VM ready: ${data.vmId}`);
+    });
+
+    this.vmManager.on('vm_stopped', (data) => {
+      console.error(`[TryCua] VM stopped: ${data.vmId}`);
+    });
+
+    this.vmManager.on('task_started', (data) => {
+      console.error(`[TryCua] Task started on ${data.vmId}: ${data.task.slice(0, 50)}...`);
+    });
+
+    this.vmManager.on('task_complete', (data) => {
+      console.error(`[TryCua] Task complete on ${data.vmId}`);
+    });
+
+    this.vmManager.on('screenshot', (data) => {
+      console.error(`[TryCua] Screenshot from ${data.vmId}`);
+    });
+  }
+
+  async run(): Promise<void> {
+    const transport = new StdioServerTransport();
+    await this.server.connect(transport);
+    console.error(`[TryCua MCP] Server running on stdio (v${VERSION})`);
+  }
+
+  async shutdown(): Promise<void> {
+    await this.vmManager.stopAll();
+  }
+}
+
+// Main entry point
+const server = new TryCuaMCPServer();
+
+process.on('SIGINT', async () => {
+  await server.shutdown();
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  await server.shutdown();
+  process.exit(0);
+});
+
+server.run().catch((error) => {
+  console.error('[TryCua MCP] Fatal error:', error);
+  process.exit(1);
+});

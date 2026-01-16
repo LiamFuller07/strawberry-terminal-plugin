@@ -1,0 +1,14 @@
+{
+  "name": "strawberry-terminal",
+  "version": "1.0.0",
+  "description": "Strawberry Terminal integration - VM orchestration, browser automation, and activity tracking for the Strawberry terminal app",
+  "author": {
+    "name": "Liam Fuller",
+    "url": "https://github.com/LiamFuller07"
+  },
+  "repository": "https://github.com/LiamFuller07/strawberry-terminal-plugin",
+  "keywords": ["strawberry", "terminal", "vm", "browser", "automation", "trycua", "computer-use"],
+  "agents": [],
+  "skills": ["vm-automation", "local-computer-use"],
+  "commands": ["spawn-vm", "local-screenshot"]
+}

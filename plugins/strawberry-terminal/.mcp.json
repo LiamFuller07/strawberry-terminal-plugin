@@ -1,0 +1,14 @@
+{
+  "trycua": {
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/servers/trycua/dist/server.js"],
+    "env": {
+      "CUA_API_KEY": "${CUA_API_KEY}"
+    }
+  },
+  "local-computer-use": {
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/servers/local-computer-use/mcp-server.js"],
+    "env": {}
+  }
+}

@@ -1,0 +1,106 @@
+import { EventEmitter } from 'events';
+import { VM, VMConfig, VMStatus, Screenshot, TaskResult, ComputerAction } from './types.js';
+/**
+ * VMManager - Manages Real Windows/macOS/Linux VMs via TryCua Cloud
+ *
+ * Uses TryCua Cloud API to provision VMs, then connects via SDK.
+ * Each VM is a real cloud-hosted machine controlled via WebSocket.
+ */
+export declare class VMManager extends EventEmitter {
+    private vms;
+    private maxVms;
+    private apiKey;
+    constructor(maxVms?: number);
+    /**
+     * Map our OSType to TryCua's OSType enum
+     */
+    private mapOSType;
+    /**
+     * Provision a VM via TryCua Cloud API
+     * This creates the actual cloud VM before we can connect to it
+     */
+    private provisionVM;
+    /**
+     * Delete a VM via TryCua Cloud API
+     */
+    private deleteVM;
+    /**
+     * Spawn a new VM via TryCua Cloud
+     */
+    spawn(config: VMConfig): Promise<VM>;
+    /**
+     * Wait for VM's WebSocket server to be ready by testing TCP connectivity
+     */
+    private waitForVMReady;
+    /**
+     * Test if WebSocket connection can be established
+     */
+    private testWebSocketConnection;
+    /**
+     * Execute a computer action on a VM
+     */
+    executeAction(vmId: string, action: ComputerAction): Promise<Screenshot>;
+    /**
+     * Execute a task on a VM (high-level task description)
+     * This uses the computer's interface to perform the task step by step
+     */
+    executeTask(vmId: string, task: string): Promise<TaskResult>;
+    /**
+     * Get current screenshot from VM
+     */
+    getScreenshot(vmId: string): Promise<Screenshot>;
+    /**
+     * Stop a VM - disconnects from SDK and deletes the cloud VM
+     */
+    stop(vmId: string): Promise<void>;
+    /**
+     * Stop all VMs
+     */
+    stopAll(): Promise<void>;
+    /**
+     * Get VM by ID
+     */
+    get(vmId: string): VM | undefined;
+    /**
+     * Get all VMs
+     */
+    getAll(): VM[];
+    /**
+     * Get VMs by status
+     */
+    getByStatus(status: VMStatus): VM[];
+    /**
+     * Get VMs by tag
+     */
+    getByTag(tag: string): VM[];
+    /**
+     * Get all unique tags across all VMs
+     */
+    getAllTags(): string[];
+    /**
+     * Add tags to an existing VM
+     */
+    addTags(vmId: string, tags: string[]): VM | undefined;
+    /**
+     * Remove tags from an existing VM
+     */
+    removeTags(vmId: string, tags: string[]): VM | undefined;
+    /**
+     * Get pool status
+     */
+    getPoolStatus(): {
+        total: number;
+        maxVms: number;
+        ready: number;
+        working: number;
+        idle: number;
+        error: number;
+        hasApiKey: boolean;
+    };
+    /**
+     * Describe a computer action for logging
+     */
+    private describeAction;
+}
+export default VMManager;
+//# sourceMappingURL=vm-manager.d.ts.map

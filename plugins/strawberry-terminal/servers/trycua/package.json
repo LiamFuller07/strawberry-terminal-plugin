@@ -1,0 +1,58 @@
+{
+  "name": "@strawberry/mcp-vm",
+  "version": "0.1.0",
+  "description": "Strawberry MCP VM Server - Enables Claude Code to spawn and control VMs via TryCua",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "strawberry-mcp-vm": "./dist/server.js",
+    "trycua-mcp": "./dist/server.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc && chmod +x dist/server.js 2>/dev/null || true",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "strawberry",
+    "mcp",
+    "trycua",
+    "vm",
+    "claude",
+    "claude-code",
+    "computer-use",
+    "browser-automation"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LiamFuller07/strawberry-cli.git",
+    "directory": "packages/trycua-mcp"
+  },
+  "license": "MIT",
+  "author": "Liam Fuller",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "@trycua/computer": "^0.1.5",
+    "@types/ws": "^8.18.1",
+    "puppeteer": "^24.34.0",
+    "uuid": "^11.1.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,591 @@
+import { EventEmitter } from 'events';
+import { v4 as uuidv4 } from 'uuid';
+import WebSocket from 'ws';
+import { Computer, OSType as CuaOSType } from '@trycua/computer';
+import {
+  VM,
+  VMConfig,
+  VMStatus,
+  Screenshot,
+  TaskResult,
+  ComputerAction,
+  OSType,
+} from './types.js';
+
+const API_BASE = process.env.CUA_API_BASE || 'https://api.cua.ai';
+
+interface VMProvisionResponse {
+  name: string;
+  host: string;
+  password: string;
+  status: string;
+  job_id?: string;
+}
+
+/**
+ * VMManager - Manages Real Windows/macOS/Linux VMs via TryCua Cloud
+ *
+ * Uses TryCua Cloud API to provision VMs, then connects via SDK.
+ * Each VM is a real cloud-hosted machine controlled via WebSocket.
+ */
+export class VMManager extends EventEmitter {
+  private vms: Map<string, { computer: Computer; meta: VM; cloudName?: string }> = new Map();
+  private maxVms: number;
+  private apiKey: string;
+
+  constructor(maxVms: number = 5) {
+    super();
+    this.maxVms = maxVms;
+    this.apiKey = process.env.CUA_API_KEY || '';
+
+    if (!this.apiKey) {
+      console.error('[VMManager] Warning: No CUA_API_KEY - VM operations will fail');
+      console.error('[VMManager] Get your API key at https://cua.ai');
+    }
+  }
+
+  /**
+   * Map our OSType to TryCua's OSType enum
+   */
+  private mapOSType(osType: OSType): CuaOSType {
+    switch (osType) {
+      case 'windows':
+        return CuaOSType.WINDOWS;
+      case 'linux':
+        return CuaOSType.LINUX;
+      case 'macos':
+      default:
+        return CuaOSType.MACOS;
+    }
+  }
+
+  /**
+   * Provision a VM via TryCua Cloud API
+   * This creates the actual cloud VM before we can connect to it
+   */
+  private async provisionVM(osType: OSType, region: string = 'north-america'): Promise<VMProvisionResponse> {
+    const response = await fetch(`${API_BASE}/v1/vms`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        os: osType,
+        configuration: 'small', // Default to small
+        region: region,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Failed to provision VM: ${response.status} - ${errorText}`);
+    }
+
+    return await response.json() as VMProvisionResponse;
+  }
+
+  /**
+   * Delete a VM via TryCua Cloud API
+   */
+  private async deleteVM(cloudName: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/v1/vms/${cloudName}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+      },
+    });
+
+    if (!response.ok && response.status !== 404) {
+      console.error(`[VMManager] Failed to delete VM ${cloudName}: ${response.status}`);
+    }
+  }
+
+  /**
+   * Spawn a new VM via TryCua Cloud
+   */
+  async spawn(config: VMConfig): Promise<VM> {
+    if (!this.apiKey) {
+      throw new Error('CUA_API_KEY not set. Get your API key at https://cua.ai');
+    }
+
+    if (this.vms.size >= this.maxVms) {
+      throw new Error(`Maximum VM limit (${this.maxVms}) reached`);
+    }
+
+    const id = uuidv4();
+    const osType = config.osType || 'windows'; // Default to Windows
+
+    const vm: VM = {
+      id,
+      name: config.name,
+      osType,
+      status: 'spawning',
+      tags: config.tags || [],
+      createdAt: new Date(),
+    };
+
+    this.vms.set(id, { computer: null as any, meta: vm });
+    this.emit('vm_created', { vmId: id, name: config.name });
+
+    try {
+      // Step 1: Provision VM via API
+      console.log(`[VMManager] Provisioning ${osType} VM...`);
+      vm.status = 'setting_up';
+      this.emit('vm_status', { vmId: id, status: 'setting_up' });
+
+      const provision = await this.provisionVM(osType, config.region || 'north-america');
+      console.log(`[VMManager] VM provisioned: ${provision.name} at ${provision.host}`);
+
+      // Step 2: Wait for VM's WebSocket to be accessible before connecting
+      // Newly provisioned VMs take time to boot and start the WebSocket server
+      console.log(`[VMManager] Waiting for VM to be fully ready...`);
+      await this.waitForVMReady(provision.host, 180); // Wait up to 3 minutes
+
+      // Step 3: Connect to the provisioned VM using SDK
+      const computer = new Computer({
+        name: provision.name, // Use the cloud-assigned name
+        osType: this.mapOSType(osType),
+        apiKey: this.apiKey,
+      });
+
+      console.log(`[VMManager] Connecting to VM at ${provision.host}...`);
+      await computer.run();
+
+      // Update our stored reference with cloud name for cleanup
+      this.vms.set(id, { computer, meta: vm, cloudName: provision.name });
+
+      // Update VM with actual host info
+      vm.name = provision.name;
+      vm.status = 'ready';
+      this.emit('vm_ready', { vmId: id });
+
+      console.log(`[VMManager] VM "${provision.name}" (${osType}) is ready`);
+
+      return vm;
+    } catch (error) {
+      vm.status = 'error';
+      this.emit('vm_error', { vmId: id, error: String(error) });
+      throw error;
+    }
+  }
+
+  /**
+   * Wait for VM's WebSocket server to be ready by testing TCP connectivity
+   */
+  private async waitForVMReady(host: string, timeoutSeconds: number = 180): Promise<void> {
+    const startTime = Date.now();
+    const wsUrl = `wss://${host}:8443/ws`;
+
+    while (Date.now() - startTime < timeoutSeconds * 1000) {
+      try {
+        // Try to establish a WebSocket connection briefly
+        const connected = await this.testWebSocketConnection(wsUrl, 5000);
+        if (connected) {
+          const elapsed = Math.floor((Date.now() - startTime) / 1000);
+          console.log(`[VMManager] VM WebSocket is ready (${elapsed}s)`);
+          return;
+        }
+      } catch {
+        // Connection failed - VM not ready yet
+      }
+
+      // Wait before retrying
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      console.log(`[VMManager] Waiting for VM WebSocket... (${elapsed}s)`);
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+
+    throw new Error(`VM not ready after ${timeoutSeconds} seconds`);
+  }
+
+  /**
+   * Test if WebSocket connection can be established
+   */
+  private testWebSocketConnection(url: string, timeout: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      // Add auth headers for cloud connection
+      const ws = new WebSocket(url, {
+        headers: {
+          'X-API-Key': this.apiKey,
+        },
+        handshakeTimeout: timeout,
+      });
+
+      const timer = setTimeout(() => {
+        ws.terminate();
+        resolve(false);
+      }, timeout);
+
+      ws.on('open', () => {
+        clearTimeout(timer);
+        ws.close();
+        resolve(true);
+      });
+
+      ws.on('error', () => {
+        clearTimeout(timer);
+        ws.terminate();
+        resolve(false);
+      });
+    });
+  }
+
+  /**
+   * Execute a computer action on a VM
+   */
+  async executeAction(vmId: string, action: ComputerAction): Promise<Screenshot> {
+    const entry = this.vms.get(vmId);
+    if (!entry) {
+      throw new Error(`VM ${vmId} not found`);
+    }
+
+    const { computer, meta: vm } = entry;
+
+    if (!computer || !computer.interface) {
+      throw new Error(`VM ${vmId} interface not ready`);
+    }
+
+    vm.lastActivity = new Date();
+
+    try {
+      const iface = computer.interface;
+
+      switch (action.type) {
+        case 'click':
+          if (action.button === 'right') {
+            await iface.rightClick(action.x, action.y);
+          } else if (action.button === 'middle') {
+            // TryCua doesn't have middle click directly, use left
+            await iface.leftClick(action.x, action.y);
+          } else {
+            await iface.leftClick(action.x, action.y);
+          }
+          break;
+
+        case 'type':
+          if (action.text) {
+            await iface.typeText(action.text);
+          }
+          break;
+
+        case 'key':
+          if (action.key) {
+            await iface.pressKey(action.key);
+          }
+          break;
+
+        case 'scroll':
+          const clicks = action.amount || 3;
+          if (action.direction === 'up') {
+            await iface.scrollUp(clicks);
+          } else {
+            await iface.scrollDown(clicks);
+          }
+          break;
+
+        case 'move':
+          if (action.x !== undefined && action.y !== undefined) {
+            await iface.moveCursor(action.x, action.y);
+          }
+          break;
+
+        case 'screenshot':
+          // Just capture, handled below
+          break;
+      }
+
+      // Capture screenshot after action
+      const screenshotBuffer = await iface.screenshot();
+      const imageB64 = screenshotBuffer.toString('base64');
+
+      const screenshot: Screenshot = {
+        vmId,
+        imageB64,
+        timestamp: new Date(),
+        lastAction: this.describeAction(action),
+      };
+
+      vm.screenshotB64 = imageB64;
+      vm.lastAction = screenshot.lastAction;
+
+      this.emit('screenshot', screenshot);
+      return screenshot;
+    } catch (error) {
+      vm.status = 'error';
+      throw error;
+    }
+  }
+
+  /**
+   * Execute a task on a VM (high-level task description)
+   * This uses the computer's interface to perform the task step by step
+   */
+  async executeTask(vmId: string, task: string): Promise<TaskResult> {
+    const entry = this.vms.get(vmId);
+    if (!entry) {
+      throw new Error(`VM ${vmId} not found`);
+    }
+
+    const { computer, meta: vm } = entry;
+
+    if (vm.status === 'stopped' || vm.status === 'error') {
+      throw new Error(`VM ${vmId} is in ${vm.status} state`);
+    }
+
+    const startTime = Date.now();
+    const screenshots: Screenshot[] = [];
+
+    vm.status = 'working';
+    vm.currentTask = task;
+    vm.lastActivity = new Date();
+
+    this.emit('task_started', { vmId, task });
+
+    try {
+      // For now, just take a screenshot and return
+      // Full task execution would require Claude computer-use agent
+      const screenshotBuffer = await computer.interface.screenshot();
+      const imageB64 = screenshotBuffer.toString('base64');
+
+      screenshots.push({
+        vmId,
+        imageB64,
+        timestamp: new Date(),
+        reasoning: `Task received: ${task}`,
+        lastAction: 'Initial screenshot',
+      });
+
+      vm.screenshotB64 = imageB64;
+      vm.status = 'idle';
+      vm.currentTask = undefined;
+
+      const result: TaskResult = {
+        vmId,
+        task,
+        success: true,
+        output: `Task "${task}" ready for execution. Screenshot captured. Use computer_action to perform specific actions.`,
+        screenshots,
+        duration: Date.now() - startTime,
+      };
+
+      this.emit('task_complete', { vmId, result });
+      return result;
+    } catch (error) {
+      vm.status = 'error';
+
+      const result: TaskResult = {
+        vmId,
+        task,
+        success: false,
+        output: '',
+        screenshots,
+        duration: Date.now() - startTime,
+        error: String(error),
+      };
+
+      this.emit('task_failed', { vmId, result });
+      return result;
+    }
+  }
+
+  /**
+   * Get current screenshot from VM
+   */
+  async getScreenshot(vmId: string): Promise<Screenshot> {
+    const entry = this.vms.get(vmId);
+    if (!entry) {
+      throw new Error(`VM ${vmId} not found`);
+    }
+
+    const { computer, meta: vm } = entry;
+
+    if (!computer || !computer.interface) {
+      // Return cached screenshot if interface not ready
+      return {
+        vmId,
+        imageB64: vm.screenshotB64 || '',
+        timestamp: new Date(),
+        reasoning: vm.reasoning,
+        lastAction: vm.lastAction || 'Interface not ready',
+      };
+    }
+
+    try {
+      const screenshotBuffer = await computer.interface.screenshot();
+      const imageB64 = screenshotBuffer.toString('base64');
+
+      const screenshot: Screenshot = {
+        vmId,
+        imageB64,
+        timestamp: new Date(),
+        reasoning: vm.reasoning,
+        lastAction: vm.lastAction,
+      };
+
+      vm.screenshotB64 = imageB64;
+      return screenshot;
+    } catch (error) {
+      // Return cached screenshot on error
+      return {
+        vmId,
+        imageB64: vm.screenshotB64 || '',
+        timestamp: new Date(),
+        reasoning: vm.reasoning,
+        lastAction: vm.lastAction || `Error: ${error}`,
+      };
+    }
+  }
+
+  /**
+   * Stop a VM - disconnects from SDK and deletes the cloud VM
+   */
+  async stop(vmId: string): Promise<void> {
+    const entry = this.vms.get(vmId);
+    if (!entry) return;
+
+    const { computer, meta: vm, cloudName } = entry;
+
+    // Disconnect SDK
+    try {
+      if (computer) {
+        await computer.stop();
+      }
+    } catch (error) {
+      console.error(`[VMManager] Error disconnecting from VM ${vmId}:`, error);
+    }
+
+    // Delete cloud VM to release resources
+    if (cloudName) {
+      console.log(`[VMManager] Deleting cloud VM ${cloudName}...`);
+      await this.deleteVM(cloudName);
+    }
+
+    vm.status = 'stopped';
+    this.vms.delete(vmId);
+    this.emit('vm_stopped', { vmId });
+  }
+
+  /**
+   * Stop all VMs
+   */
+  async stopAll(): Promise<void> {
+    const stopPromises = Array.from(this.vms.keys()).map((id) => this.stop(id));
+    await Promise.all(stopPromises);
+  }
+
+  /**
+   * Get VM by ID
+   */
+  get(vmId: string): VM | undefined {
+    return this.vms.get(vmId)?.meta;
+  }
+
+  /**
+   * Get all VMs
+   */
+  getAll(): VM[] {
+    return Array.from(this.vms.values()).map((entry) => entry.meta);
+  }
+
+  /**
+   * Get VMs by status
+   */
+  getByStatus(status: VMStatus): VM[] {
+    return this.getAll().filter((vm) => vm.status === status);
+  }
+
+  /**
+   * Get VMs by tag
+   */
+  getByTag(tag: string): VM[] {
+    return this.getAll().filter((vm) => vm.tags.includes(tag));
+  }
+
+  /**
+   * Get all unique tags across all VMs
+   */
+  getAllTags(): string[] {
+    const tagSet = new Set<string>();
+    for (const vm of this.getAll()) {
+      for (const tag of vm.tags) {
+        tagSet.add(tag);
+      }
+    }
+    return Array.from(tagSet).sort();
+  }
+
+  /**
+   * Add tags to an existing VM
+   */
+  addTags(vmId: string, tags: string[]): VM | undefined {
+    const entry = this.vms.get(vmId);
+    if (!entry) return undefined;
+
+    for (const tag of tags) {
+      if (!entry.meta.tags.includes(tag)) {
+        entry.meta.tags.push(tag);
+      }
+    }
+    return entry.meta;
+  }
+
+  /**
+   * Remove tags from an existing VM
+   */
+  removeTags(vmId: string, tags: string[]): VM | undefined {
+    const entry = this.vms.get(vmId);
+    if (!entry) return undefined;
+
+    entry.meta.tags = entry.meta.tags.filter(t => !tags.includes(t));
+    return entry.meta;
+  }
+
+  /**
+   * Get pool status
+   */
+  getPoolStatus(): {
+    total: number;
+    maxVms: number;
+    ready: number;
+    working: number;
+    idle: number;
+    error: number;
+    hasApiKey: boolean;
+  } {
+    const vms = this.getAll();
+    return {
+      total: vms.length,
+      maxVms: this.maxVms,
+      ready: vms.filter((vm) => vm.status === 'ready').length,
+      working: vms.filter((vm) => vm.status === 'working').length,
+      idle: vms.filter((vm) => vm.status === 'idle').length,
+      error: vms.filter((vm) => vm.status === 'error').length,
+      hasApiKey: !!this.apiKey,
+    };
+  }
+
+  /**
+   * Describe a computer action for logging
+   */
+  private describeAction(action: ComputerAction): string {
+    switch (action.type) {
+      case 'click':
+        return `click(${action.x}, ${action.y}) [${action.button || 'left'}]`;
+      case 'type':
+        return `type("${action.text?.slice(0, 20)}${(action.text?.length || 0) > 20 ? '...' : ''}")`;
+      case 'scroll':
+        return `scroll(${action.direction}, ${action.amount})`;
+      case 'key':
+        return `key(${action.key})`;
+      case 'move':
+        return `move(${action.x}, ${action.y})`;
+      case 'screenshot':
+        return 'screenshot()';
+      default:
+        return 'unknown action';
+    }
+  }
+}
+
+export default VMManager;
