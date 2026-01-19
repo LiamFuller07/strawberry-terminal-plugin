@@ -5,6 +5,21 @@ export type VMStatus = 'spawning' | 'setting_up' | 'ready' | 'working' | 'idle' 
 export type OSType = 'macos' | 'linux' | 'windows';
 export type VMRegion = 'north-america' | 'europe' | 'asia-pacific' | 'south-america';
 export type VMSize = 'small' | 'medium' | 'large';
+/**
+ * VM resource specifications based on size
+ */
+export interface VMResources {
+    size: VMSize;
+    ram: string;
+    ramMB: number;
+    cpu: number;
+    storage: string;
+}
+/**
+ * Resource specs by VM size (TryCua Cloud - updated Jan 2026)
+ * See: https://cua.ai/docs
+ */
+export declare const VM_SIZE_SPECS: Record<VMSize, VMResources>;
 export interface VMConfig {
     name: string;
     osType?: OSType;
@@ -21,6 +36,9 @@ export interface VM {
     osType: OSType;
     status: VMStatus;
     tags: string[];
+    size: VMSize;
+    resources: VMResources;
+    region?: VMRegion;
     createdAt: Date;
     lastActivity?: Date;
     currentTask?: string;

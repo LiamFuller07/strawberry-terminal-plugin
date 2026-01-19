@@ -41,10 +41,19 @@ export declare class VMManager extends EventEmitter {
      */
     executeAction(vmId: string, action: ComputerAction): Promise<Screenshot>;
     /**
+     * Parse a task to extract browser-related actions
+     */
+    private parseBrowserTask;
+    /**
      * Execute a task on a VM (high-level task description)
      * This uses the computer's interface to perform the task step by step
+     * Supports automatic Chrome launching and navigation
      */
     executeTask(vmId: string, task: string): Promise<TaskResult>;
+    /**
+     * Helper to add delay between actions
+     */
+    private delay;
     /**
      * Get current screenshot from VM
      */

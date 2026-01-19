@@ -7,8 +7,5 @@
     "url": "https://github.com/LiamFuller07"
   },
   "repository": "https://github.com/LiamFuller07/strawberry-terminal-plugin",
-  "keywords": ["strawberry", "terminal", "vm", "browser", "automation", "trycua", "computer-use"],
-  "agents": [],
-  "skills": ["vm-automation", "local-computer-use"],
-  "commands": ["spawn-vm", "local-screenshot"]
+  "keywords": ["strawberry", "terminal", "vm", "browser", "automation", "trycua", "computer-use"]
 }

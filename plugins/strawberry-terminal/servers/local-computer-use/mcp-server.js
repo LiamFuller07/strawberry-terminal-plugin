@@ -9,7 +9,30 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, } from '@modelcontextprotocol/sdk/types.js';
 import { LocalComputerController } from './controller.js';
+import * as fs from 'fs';
 const VERSION = '0.1.0';
+const LOCAL_SCREENSHOTS_DIR = '/tmp/strawberry-local-screenshots';
+/**
+ * Save local screenshot for Strawberry TUI viewer
+ */
+function saveLocalScreenshot(imageB64, action) {
+    try {
+        if (!fs.existsSync(LOCAL_SCREENSHOTS_DIR)) {
+            fs.mkdirSync(LOCAL_SCREENSHOTS_DIR, { recursive: true });
+        }
+        const screenshot = {
+            vmId: 'local-mac',
+            vmName: 'Local Mac',
+            timestamp: new Date().toISOString(),
+            imageData: imageB64,
+            lastAction: action || 'screenshot',
+        };
+        fs.writeFileSync(`${LOCAL_SCREENSHOTS_DIR}/local-mac.json`, JSON.stringify(screenshot, null, 2));
+    }
+    catch {
+        // Ignore errors
+    }
+}
 /**
  * Local Computer Use MCP Server
  *
@@ -145,6 +168,8 @@ export class LocalComputerMCPServer {
                     case 'local_screenshot': {
                         const displayId = args?.display || 1;
                         const screenshot = await this.controller.screenshot(displayId);
+                        // Save for Strawberry TUI viewer
+                        saveLocalScreenshot(screenshot.imageB64, 'screenshot');
                         const content = [
                             {
                                 type: 'text',
@@ -189,6 +214,8 @@ export class LocalComputerMCPServer {
                         ];
                         // Include screenshot if action produced one
                         if (result.screenshot) {
+                            // Save for Strawberry TUI viewer
+                            saveLocalScreenshot(result.screenshot.imageB64, result.action);
                             content.push({
                                 type: 'image',
                                 data: result.screenshot.imageB64,

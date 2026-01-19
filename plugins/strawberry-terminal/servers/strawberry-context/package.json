@@ -1,0 +1,22 @@
+{
+  "name": "@strawberry/context-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for bidirectional context sync between Claude Code and Strawberry TUI",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "strawberry-context-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

@@ -1,9 +1,15 @@
 {
+  "strawberry-context": {
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/servers/strawberry-context/dist/index.js"],
+    "env": {}
+  },
   "trycua": {
     "command": "node",
     "args": ["${CLAUDE_PLUGIN_ROOT}/servers/trycua/dist/server.js"],
     "env": {
-      "CUA_API_KEY": "${CUA_API_KEY}"
+      "CUA_API_KEY": "${CUA_API_KEY}",
+      "TRYCUA_API_KEY": "${TRYCUA_API_KEY}"
     }
   },
   "local-computer-use": {

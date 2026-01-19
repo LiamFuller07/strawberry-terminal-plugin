@@ -7,6 +7,8 @@ import * as fs from 'fs';
 const VERSION = '0.1.0';
 const MCP_EVENTS_FILE = '/tmp/bat-mcp-events.jsonl';
 const VM_STATUS_FILE = '/tmp/bat-vm-status.json';
+const VM_SCREENSHOTS_DIR = '/tmp/strawberry-vm-screenshots';
+const DEFAULT_STREAM_INTERVAL_MS = 400;
 /**
  * Write event for sidebar tracking
  */
@@ -14,6 +16,28 @@ function writeEvent(event) {
     try {
         const line = JSON.stringify({ ...event, timestamp: new Date().toISOString() }) + '\n';
         fs.appendFileSync(MCP_EVENTS_FILE, line);
+    }
+    catch {
+        // Ignore errors
+    }
+}
+/**
+ * Save VM screenshot for Strawberry TUI viewer
+ */
+function saveVMScreenshot(vmId, vmName, imageB64, lastAction) {
+    try {
+        // Ensure directory exists
+        if (!fs.existsSync(VM_SCREENSHOTS_DIR)) {
+            fs.mkdirSync(VM_SCREENSHOTS_DIR, { recursive: true });
+        }
+        const screenshot = {
+            vmId,
+            vmName,
+            timestamp: new Date().toISOString(),
+            imageData: imageB64,
+            lastAction,
+        };
+        fs.writeFileSync(`${VM_SCREENSHOTS_DIR}/${vmId}.json`, JSON.stringify(screenshot, null, 2));
     }
     catch {
         // Ignore errors
@@ -30,9 +54,24 @@ function updateVMStatus(vmManager) {
             status: vm.status,
             osType: vm.osType,
             tags: vm.tags,
+            size: vm.size,
+            resources: vm.resources,
+            region: vm.region,
             createdAt: vm.createdAt.toISOString(),
         }));
-        fs.writeFileSync(VM_STATUS_FILE, JSON.stringify({ vms, lastUpdate: new Date().toISOString() }, null, 2));
+        // Calculate total resources
+        const totalRAM = vms.reduce((sum, vm) => sum + (vm.resources?.ramMB || 0), 0);
+        const totalCPU = vms.reduce((sum, vm) => sum + (vm.resources?.cpu || 0), 0);
+        fs.writeFileSync(VM_STATUS_FILE, JSON.stringify({
+            vms,
+            totals: {
+                vmCount: vms.length,
+                ramMB: totalRAM,
+                ram: `${(totalRAM / 1024).toFixed(1)}GB`,
+                cpu: totalCPU,
+            },
+            lastUpdate: new Date().toISOString()
+        }, null, 2));
     }
     catch {
         // Ignore errors
@@ -52,6 +91,7 @@ function updateVMStatus(vmManager) {
 class TryCuaMCPServer {
     server;
     vmManager;
+    screenStreams = new Map();
     constructor() {
         this.vmManager = new VMManager(10);
         this.server = new Server({
@@ -73,33 +113,33 @@ class TryCuaMCPServer {
             const tools = [
                 {
                     name: 'spawn_vm',
-                    description: 'Spawn a new REAL Windows/macOS/Linux VM in the cloud. Returns the VM ID for subsequent operations. VMs are provisioned via TryCua Cloud and take ~10-30 seconds to be ready.',
+                    description: 'Spawn a new Linux VM in the cloud. IMPORTANT: Only pass the "name" parameter - all other parameters have optimal defaults (Linux, Asia, 8GB RAM). Do NOT specify os_type, region, or size unless explicitly asked.',
                     inputSchema: {
                         type: 'object',
                         properties: {
                             name: {
                                 type: 'string',
-                                description: 'Name for the VM (for identification)',
+                                description: 'Name for the VM (required)',
                             },
                             os_type: {
                                 type: 'string',
-                                enum: ['windows', 'macos', 'linux'],
-                                description: 'Operating system type (default: windows)',
+                                enum: ['linux', 'windows', 'macos'],
+                                description: 'DO NOT SET - defaults to linux',
                             },
                             region: {
                                 type: 'string',
-                                enum: ['north-america', 'europe', 'asia-pacific', 'south-america'],
-                                description: 'Cloud region for the VM (default: north-america)',
+                                enum: ['asia-pacific', 'north-america', 'europe', 'south-america'],
+                                description: 'DO NOT SET - defaults to asia-pacific',
                             },
                             size: {
                                 type: 'string',
-                                enum: ['small', 'medium', 'large'],
-                                description: 'VM size/resources (default: small)',
+                                enum: ['medium', 'small', 'large'],
+                                description: 'DO NOT SET - defaults to medium (8GB RAM)',
                             },
                             tags: {
                                 type: 'array',
                                 items: { type: 'string' },
-                                description: 'Tags for categorizing VMs (e.g., ["strawberry-browser", "production"])',
+                                description: 'Optional tags',
                             },
                         },
                         required: ['name'],
@@ -181,6 +221,38 @@ class TryCuaMCPServer {
                             vm_id: {
                                 type: 'string',
                                 description: 'The VM ID',
+                            },
+                        },
+                        required: ['vm_id'],
+                    },
+                },
+                {
+                    name: 'start_screen_stream',
+                    description: 'Start streaming screenshots from a VM to the sidebar. Screenshots are captured frequently and displayed in the Strawberry TUI.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            vm_id: {
+                                type: 'string',
+                                description: 'The VM ID to stream from',
+                            },
+                            interval_ms: {
+                                type: 'number',
+                                description: 'Interval between screenshots in ms (default: 200 for 5 fps)',
+                            },
+                        },
+                        required: ['vm_id'],
+                    },
+                },
+                {
+                    name: 'stop_screen_stream',
+                    description: 'Stop streaming screenshots from a VM',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            vm_id: {
+                                type: 'string',
+                                description: 'The VM ID to stop streaming',
                             },
                         },
                         required: ['vm_id'],
@@ -305,9 +377,9 @@ class TryCuaMCPServer {
                     case 'spawn_vm': {
                         const config = {
                             name: args?.name,
-                            osType: args?.os_type || 'windows', // Default to Windows
-                            region: args?.region || 'north-america',
-                            size: args?.size || 'small',
+                            osType: args?.os_type || 'linux', // Default to Linux
+                            region: args?.region || 'asia-pacific', // Default to Asia
+                            size: args?.size || 'medium', // Default to medium (8GB RAM)
                             tags: args?.tags || [],
                             setupChrome: args?.setup_chrome !== false,
                             installClaudeExtension: args?.install_claude_extension === true,
@@ -318,6 +390,18 @@ class TryCuaMCPServer {
                         // Update status after spawn
                         writeEvent({ type: 'spawn_vm', vm_id: vm.id, vm_name: vm.name, os_type: vm.osType, status: vm.status });
                         updateVMStatus(this.vmManager);
+                        // Take initial screenshot for sidebar display
+                        try {
+                            const initialScreenshot = await this.vmManager.getScreenshot(vm.id);
+                            if (initialScreenshot?.imageB64) {
+                                saveVMScreenshot(vm.id, vm.name, initialScreenshot.imageB64, 'VM ready');
+                            }
+                        }
+                        catch {
+                            // Ignore screenshot errors - VM might still be initializing
+                        }
+                        // Auto-start screen streaming for sidebar updates
+                        await this.startScreenStream(vm.id, DEFAULT_STREAM_INTERVAL_MS);
                         return {
                             content: [
                                 {
@@ -329,6 +413,9 @@ class TryCuaMCPServer {
                                         status: vm.status,
                                         os_type: vm.osType,
                                         tags: vm.tags,
+                                        size: vm.size,
+                                        resources: vm.resources,
+                                        region: vm.region,
                                         message: `VM "${vm.name}" spawned successfully. Use vm_id "${vm.id}" for subsequent operations.`,
                                     }, null, 2),
                                 },
@@ -366,6 +453,9 @@ class TryCuaMCPServer {
                                 });
                                 // Write screenshot event
                                 writeEvent({ type: 'screenshot', vm_id: vmId, data: 'Screenshot captured' });
+                                // Save screenshot for Strawberry TUI viewer
+                                const vm = this.vmManager.get(vmId);
+                                saveVMScreenshot(vmId, vm?.name || vmId, lastScreenshot.imageB64, task);
                             }
                         }
                         return { content };
@@ -389,9 +479,12 @@ class TryCuaMCPServer {
                                     action.type;
                         writeEvent({ type: 'action', vm_id: vmId, action: actionDesc });
                         const screenshot = await this.vmManager.executeAction(vmId, action);
-                        // Write screenshot event
+                        // Write screenshot event and save for TUI viewer
                         if (screenshot.imageB64) {
                             writeEvent({ type: 'screenshot', vm_id: vmId, data: screenshot.lastAction });
+                            // Save screenshot for Strawberry TUI viewer
+                            const vm = this.vmManager.get(vmId);
+                            saveVMScreenshot(vmId, vm?.name || vmId, screenshot.imageB64, actionDesc);
                         }
                         updateVMStatus(this.vmManager);
                         const content = [
@@ -418,6 +511,11 @@ class TryCuaMCPServer {
                         const screenshot = await this.vmManager.getScreenshot(vmId);
                         // Write screenshot event for sidebar
                         writeEvent({ type: 'screenshot', vm_id: vmId, data: screenshot.lastAction || 'screenshot' });
+                        // Save screenshot for Strawberry TUI viewer
+                        if (screenshot.imageB64) {
+                            const vm = this.vmManager.get(vmId);
+                            saveVMScreenshot(vmId, vm?.name || vmId, screenshot.imageB64, screenshot.lastAction);
+                        }
                         const content = [
                             {
                                 type: 'text',
@@ -438,8 +536,56 @@ class TryCuaMCPServer {
                         }
                         return { content };
                     }
+                    case 'start_screen_stream': {
+                        const vmId = args?.vm_id;
+                        const intervalMs = args?.interval_ms || DEFAULT_STREAM_INTERVAL_MS;
+                        await this.startScreenStream(vmId, intervalMs);
+                        return {
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: JSON.stringify({
+                                        success: true,
+                                        message: `Screen streaming started for VM ${vmId} (every ${intervalMs}ms - ${Math.round(1000 / intervalMs)} fps)`,
+                                        vm_id: vmId,
+                                        interval_ms: intervalMs,
+                                    }, null, 2),
+                                },
+                            ],
+                        };
+                    }
+                    case 'stop_screen_stream': {
+                        const vmId = args?.vm_id;
+                        if (this.screenStreams.has(vmId)) {
+                            clearInterval(this.screenStreams.get(vmId));
+                            this.screenStreams.delete(vmId);
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: JSON.stringify({ success: true, message: `Screen streaming stopped for VM ${vmId}` }, null, 2),
+                                    },
+                                ],
+                            };
+                        }
+                        else {
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: JSON.stringify({ success: false, message: `No active stream for VM ${vmId}` }, null, 2),
+                                    },
+                                ],
+                            };
+                        }
+                    }
                     case 'stop_vm': {
                         const vmId = args?.vm_id;
+                        // Stop any active screen stream
+                        if (this.screenStreams.has(vmId)) {
+                            clearInterval(this.screenStreams.get(vmId));
+                            this.screenStreams.delete(vmId);
+                        }
                         // Write event for sidebar
                         writeEvent({ type: 'stop_vm', vm_id: vmId, status: 'stopping' });
                         await this.vmManager.stop(vmId);
@@ -460,18 +606,28 @@ class TryCuaMCPServer {
                     }
                     case 'list_vms': {
                         const vms = this.vmManager.getAll();
+                        const totalRAM = vms.reduce((sum, vm) => sum + (vm.resources?.ramMB || 0), 0);
+                        const totalCPU = vms.reduce((sum, vm) => sum + (vm.resources?.cpu || 0), 0);
                         return {
                             content: [
                                 {
                                     type: 'text',
                                     text: JSON.stringify({
                                         count: vms.length,
+                                        totals: {
+                                            ramMB: totalRAM,
+                                            ram: `${(totalRAM / 1024).toFixed(1)}GB`,
+                                            cpu: totalCPU,
+                                        },
                                         vms: vms.map((vm) => ({
                                             id: vm.id,
                                             name: vm.name,
                                             status: vm.status,
                                             os_type: vm.osType,
                                             tags: vm.tags,
+                                            size: vm.size,
+                                            resources: vm.resources,
+                                            region: vm.region,
                                             created_at: vm.createdAt.toISOString(),
                                             current_task: vm.currentTask,
                                         })),
@@ -675,6 +831,34 @@ class TryCuaMCPServer {
                 };
             }
         });
+    }
+    async startScreenStream(vmId, intervalMs) {
+        if (this.screenStreams.has(vmId)) {
+            clearInterval(this.screenStreams.get(vmId));
+        }
+        const vm = this.vmManager.get(vmId);
+        const streamInterval = setInterval(async () => {
+            try {
+                const screenshot = await this.vmManager.getScreenshot(vmId);
+                if (screenshot?.imageB64) {
+                    saveVMScreenshot(vmId, vm?.name || vmId, screenshot.imageB64, 'streaming');
+                }
+            }
+            catch {
+                clearInterval(streamInterval);
+                this.screenStreams.delete(vmId);
+            }
+        }, intervalMs);
+        this.screenStreams.set(vmId, streamInterval);
+        try {
+            const screenshot = await this.vmManager.getScreenshot(vmId);
+            if (screenshot?.imageB64) {
+                saveVMScreenshot(vmId, vm?.name || vmId, screenshot.imageB64, 'stream started');
+            }
+        }
+        catch {
+            // Ignore first screenshot error
+        }
     }
     setupResourceHandlers() {
         // List resources (VMs as resources)

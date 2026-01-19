@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
 import WebSocket from 'ws';
 import { Computer, OSType as CuaOSType } from '@trycua/computer';
+import sharp from 'sharp';
 import {
   VM,
   VMConfig,
@@ -10,9 +11,32 @@ import {
   TaskResult,
   ComputerAction,
   OSType,
+  VMSize,
+  VM_SIZE_SPECS,
 } from './types.js';
 
 const API_BASE = process.env.CUA_API_BASE || 'https://api.cua.ai';
+const MAX_IMAGE_WIDTH = 1200; // Max width for screenshots to avoid API limits
+
+/**
+ * Resize screenshot buffer to fit within API limits
+ */
+async function resizeScreenshot(buffer: Buffer): Promise<Buffer> {
+  try {
+    const metadata = await sharp(buffer).metadata();
+    if (metadata.width && metadata.width > MAX_IMAGE_WIDTH) {
+      return await sharp(buffer)
+        .resize(MAX_IMAGE_WIDTH, undefined, { fit: 'inside' })
+        .png({ quality: 80 })
+        .toBuffer();
+    }
+    return buffer;
+  } catch (e) {
+    // If resize fails, return original
+    console.error('[VMManager] Screenshot resize failed:', e);
+    return buffer;
+  }
+}
 
 interface VMProvisionResponse {
   name: string;
@@ -36,7 +60,7 @@ export class VMManager extends EventEmitter {
   constructor(maxVms: number = 5) {
     super();
     this.maxVms = maxVms;
-    this.apiKey = process.env.CUA_API_KEY || '';
+    this.apiKey = process.env.CUA_API_KEY || process.env.TRYCUA_API_KEY || '';
 
     if (!this.apiKey) {
       console.error('[VMManager] Warning: No CUA_API_KEY - VM operations will fail');
@@ -63,7 +87,7 @@ export class VMManager extends EventEmitter {
    * Provision a VM via TryCua Cloud API
    * This creates the actual cloud VM before we can connect to it
    */
-  private async provisionVM(osType: OSType, region: string = 'north-america'): Promise<VMProvisionResponse> {
+  private async provisionVM(osType: OSType, region: string = 'north-america', size: VMSize = 'small'): Promise<VMProvisionResponse> {
     const response = await fetch(`${API_BASE}/v1/vms`, {
       method: 'POST',
       headers: {
@@ -72,7 +96,7 @@ export class VMManager extends EventEmitter {
       },
       body: JSON.stringify({
         os: osType,
-        configuration: 'small', // Default to small
+        configuration: size || 'small',
         region: region,
       }),
     });
@@ -115,6 +139,8 @@ export class VMManager extends EventEmitter {
 
     const id = uuidv4();
     const osType = config.osType || 'windows'; // Default to Windows
+    const size: VMSize = config.size || 'small';
+    const resources = VM_SIZE_SPECS[size];
 
     const vm: VM = {
       id,
@@ -122,6 +148,9 @@ export class VMManager extends EventEmitter {
       osType,
       status: 'spawning',
       tags: config.tags || [],
+      size,
+      resources,
+      region: config.region,
       createdAt: new Date(),
     };
 
@@ -134,7 +163,7 @@ export class VMManager extends EventEmitter {
       vm.status = 'setting_up';
       this.emit('vm_status', { vmId: id, status: 'setting_up' });
 
-      const provision = await this.provisionVM(osType, config.region || 'north-america');
+      const provision = await this.provisionVM(osType, config.region || 'north-america', size);
       console.log(`[VMManager] VM provisioned: ${provision.name} at ${provision.host}`);
 
       // Step 2: Wait for VM's WebSocket to be accessible before connecting
@@ -295,8 +324,9 @@ export class VMManager extends EventEmitter {
           break;
       }
 
-      // Capture screenshot after action
-      const screenshotBuffer = await iface.screenshot();
+      // Capture screenshot after action and resize to fit API limits
+      const rawScreenshot = await iface.screenshot();
+      const screenshotBuffer = await resizeScreenshot(rawScreenshot);
       const imageB64 = screenshotBuffer.toString('base64');
 
       const screenshot: Screenshot = {
@@ -318,8 +348,42 @@ export class VMManager extends EventEmitter {
   }
 
   /**
+   * Parse a task to extract browser-related actions
+   */
+  private parseBrowserTask(task: string): { action: 'open_browser' | 'navigate' | 'search' | 'none'; url?: string; query?: string } {
+    const lowerTask = task.toLowerCase();
+
+    // Check for URL navigation
+    const urlMatch = task.match(/(?:go to|navigate to|open|visit|browse to)\s+(https?:\/\/[^\s]+|[a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z]{2,})+[^\s]*)/i);
+    if (urlMatch) {
+      let url = urlMatch[1];
+      if (!url.startsWith('http')) {
+        url = 'https://' + url;
+      }
+      return { action: 'navigate', url };
+    }
+
+    // Check for search
+    const searchMatch = task.match(/(?:search|google|look up|find)\s+(?:for\s+)?["']?([^"']+?)["']?(?:\s+on\s+(?:google|chrome|the\s+web))?$/i);
+    if (searchMatch) {
+      return { action: 'search', query: searchMatch[1].trim() };
+    }
+
+    // Check for browser opening (Firefox or Chrome)
+    if (lowerTask.includes('open chrome') || lowerTask.includes('launch chrome') ||
+        lowerTask.includes('start chrome') || lowerTask.includes('open browser') ||
+        lowerTask.includes('open chromium') || lowerTask.includes('open firefox') ||
+        lowerTask.includes('launch firefox') || lowerTask.includes('start firefox')) {
+      return { action: 'open_browser' };
+    }
+
+    return { action: 'none' };
+  }
+
+  /**
    * Execute a task on a VM (high-level task description)
    * This uses the computer's interface to perform the task step by step
+   * Supports automatic Chrome launching and navigation
    */
   async executeTask(vmId: string, task: string): Promise<TaskResult> {
     const entry = this.vms.get(vmId);
@@ -335,6 +399,7 @@ export class VMManager extends EventEmitter {
 
     const startTime = Date.now();
     const screenshots: Screenshot[] = [];
+    const actions: string[] = [];
 
     vm.status = 'working';
     vm.currentTask = task;
@@ -343,11 +408,15 @@ export class VMManager extends EventEmitter {
     this.emit('task_started', { vmId, task });
 
     try {
-      // For now, just take a screenshot and return
-      // Full task execution would require Claude computer-use agent
-      const screenshotBuffer = await computer.interface.screenshot();
-      const imageB64 = screenshotBuffer.toString('base64');
+      const iface = computer.interface;
 
+      // Parse the task to see if we can automate it
+      const parsed = this.parseBrowserTask(task);
+
+      // Take initial screenshot and resize
+      let rawBuffer = await iface.screenshot();
+      let screenshotBuffer = await resizeScreenshot(rawBuffer);
+      let imageB64 = screenshotBuffer.toString('base64');
       screenshots.push({
         vmId,
         imageB64,
@@ -356,15 +425,123 @@ export class VMManager extends EventEmitter {
         lastAction: 'Initial screenshot',
       });
 
+      if (parsed.action !== 'none') {
+        // Open browser if needed (Firefox preferred, fallback to Chrome)
+        if (parsed.action === 'open_browser' || parsed.action === 'navigate' || parsed.action === 'search') {
+          console.log(`[VMManager] Opening Firefox on VM ${vmId}...`);
+
+          // For Linux: Open terminal and launch Firefox
+          if (vm.osType === 'linux') {
+            // Use keyboard shortcut to open terminal (works on most Linux DEs)
+            await iface.pressKey('ctrl+alt+t');
+            await this.delay(1500);
+
+            // Type command to launch Firefox (preferred) or Chrome as fallback
+            await iface.typeText('firefox 2>/dev/null || chromium-browser --no-first-run 2>/dev/null || google-chrome --no-first-run 2>/dev/null &');
+            await iface.pressKey('Return');
+            actions.push('Opened terminal and launched Firefox');
+
+            await this.delay(3000); // Wait for Firefox to open
+
+            // Close the terminal
+            await iface.pressKey('ctrl+d');
+            await this.delay(500);
+          } else if (vm.osType === 'windows') {
+            // Windows: Win+R, type firefox, Enter
+            await iface.pressKey('super+r');
+            await this.delay(500);
+            await iface.typeText('firefox');
+            await iface.pressKey('Return');
+            actions.push('Launched Firefox via Run dialog');
+            await this.delay(3000);
+          } else if (vm.osType === 'macos') {
+            // macOS: Spotlight, type Firefox, Enter
+            await iface.pressKey('cmd+space');
+            await this.delay(500);
+            await iface.typeText('Firefox');
+            await iface.pressKey('Return');
+            actions.push('Launched Firefox via Spotlight');
+            await this.delay(3000);
+          }
+
+          // Take screenshot after Firefox opens and resize
+          rawBuffer = await iface.screenshot();
+          screenshotBuffer = await resizeScreenshot(rawBuffer);
+          imageB64 = screenshotBuffer.toString('base64');
+          screenshots.push({
+            vmId,
+            imageB64,
+            timestamp: new Date(),
+            reasoning: 'Firefox launched',
+            lastAction: 'Firefox opened',
+          });
+        }
+
+        // Navigate to URL if specified
+        if (parsed.action === 'navigate' && parsed.url) {
+          console.log(`[VMManager] Navigating to ${parsed.url}...`);
+
+          // Focus address bar and navigate
+          await iface.pressKey('ctrl+l');
+          await this.delay(300);
+          await iface.typeText(parsed.url);
+          await iface.pressKey('Return');
+          actions.push(`Navigated to ${parsed.url}`);
+
+          await this.delay(3000); // Wait for page to load
+
+          // Take screenshot after navigation and resize
+          rawBuffer = await iface.screenshot();
+          screenshotBuffer = await resizeScreenshot(rawBuffer);
+          imageB64 = screenshotBuffer.toString('base64');
+          screenshots.push({
+            vmId,
+            imageB64,
+            timestamp: new Date(),
+            reasoning: `Navigated to ${parsed.url}`,
+            lastAction: `Loaded ${parsed.url}`,
+          });
+        }
+
+        // Search if specified
+        if (parsed.action === 'search' && parsed.query) {
+          console.log(`[VMManager] Searching for "${parsed.query}"...`);
+
+          // Go to address bar and search
+          await iface.pressKey('ctrl+l');
+          await this.delay(300);
+          await iface.typeText(parsed.query);
+          await iface.pressKey('Return');
+          actions.push(`Searched for "${parsed.query}"`);
+
+          await this.delay(3000); // Wait for results
+
+          // Take screenshot after search and resize
+          rawBuffer = await iface.screenshot();
+          screenshotBuffer = await resizeScreenshot(rawBuffer);
+          imageB64 = screenshotBuffer.toString('base64');
+          screenshots.push({
+            vmId,
+            imageB64,
+            timestamp: new Date(),
+            reasoning: `Searched for "${parsed.query}"`,
+            lastAction: `Search results for "${parsed.query}"`,
+          });
+        }
+      }
+
       vm.screenshotB64 = imageB64;
       vm.status = 'idle';
       vm.currentTask = undefined;
+      vm.lastAction = actions.length > 0 ? actions[actions.length - 1] : 'Task completed';
 
       const result: TaskResult = {
         vmId,
         task,
         success: true,
-        output: `Task "${task}" ready for execution. Screenshot captured. Use computer_action to perform specific actions.`,
+        output: actions.length > 0
+          ? `Task completed. Actions performed: ${actions.join(', ')}`
+          : `Task "${task}" ready for execution. Screenshot captured. Use computer_action to perform specific actions.`,
         screenshots,
         duration: Date.now() - startTime,
       };
@@ -390,6 +567,13 @@ export class VMManager extends EventEmitter {
   }
 
   /**
+   * Helper to add delay between actions
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
    * Get current screenshot from VM
    */
   async getScreenshot(vmId: string): Promise<Screenshot> {
@@ -412,7 +596,8 @@ export class VMManager extends EventEmitter {
     }
 
     try {
-      const screenshotBuffer = await computer.interface.screenshot();
+      const rawBuffer = await computer.interface.screenshot();
+      const screenshotBuffer = await resizeScreenshot(rawBuffer);
       const imageB64 = screenshotBuffer.toString('base64');
 
       const screenshot: Screenshot = {
