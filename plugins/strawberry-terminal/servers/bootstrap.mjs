@@ -49,6 +49,7 @@ const addAppResources = (appPath) => {
   if (!appPath) return;
   const resourcesDir = path.join(appPath, 'Contents', 'Resources');
   addCandidate(resourcesDir);
+  addCandidate(path.join(resourcesDir, 'resources'));
   addCandidate(path.join(resourcesDir, '_up_', '_up_', '_up_'));
 };
 
