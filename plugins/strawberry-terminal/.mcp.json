@@ -1,12 +1,12 @@
 {
   "strawberry-context": {
     "command": "node",
-    "args": ["${CLAUDE_PLUGIN_ROOT}/servers/strawberry-context/dist/index.js"],
+    "args": ["${CLAUDE_PLUGIN_ROOT}/servers/bootstrap.mjs", "strawberry-context"],
     "env": {}
   },
   "trycua": {
     "command": "node",
-    "args": ["${CLAUDE_PLUGIN_ROOT}/servers/trycua/dist/server.js"],
+    "args": ["${CLAUDE_PLUGIN_ROOT}/servers/bootstrap.mjs", "trycua"],
     "env": {
       "CUA_API_KEY": "${CUA_API_KEY}",
       "TRYCUA_API_KEY": "${TRYCUA_API_KEY}"
@@ -14,7 +14,7 @@
   },
   "local-computer-use": {
     "command": "node",
-    "args": ["${CLAUDE_PLUGIN_ROOT}/servers/local-computer-use/mcp-server.js"],
+    "args": ["${CLAUDE_PLUGIN_ROOT}/servers/bootstrap.mjs", "local-computer-use"],
     "env": {}
   }
 }
