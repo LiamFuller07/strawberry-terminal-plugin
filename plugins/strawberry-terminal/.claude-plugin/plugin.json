@@ -1,6 +1,6 @@
 {
   "name": "strawberry-terminal",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Strawberry Terminal integration - VM orchestration, browser automation, and activity tracking for the Strawberry terminal app",
   "author": {
     "name": "Liam Fuller",
