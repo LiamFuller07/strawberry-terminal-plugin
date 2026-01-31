@@ -9,6 +9,7 @@ const MAX_IMAGE_WIDTH = 1200; // Max width for screenshots to avoid API limits
 // Moltbot Master integration for VPS registration
 const MOLTBOT_MASTER_URL = process.env.MOLTBOT_MASTER_URL || 'https://moltbot-master.liam-939.workers.dev';
 const HEARTBEAT_INTERVAL_MS = 30000; // 30 seconds
+const TASK_POLL_INTERVAL_MS = 10000; // 10 seconds - poll for delegated tasks
 /**
  * Resize screenshot buffer to fit within API limits
  */
@@ -38,6 +39,7 @@ async function resizeScreenshot(buffer) {
 export class VMManager extends EventEmitter {
     vms = new Map();
     heartbeatTimers = new Map();
+    taskPollTimers = new Map();
     maxVms;
     apiKey;
     enableMasterRegistration;
@@ -129,6 +131,91 @@ export class VMManager extends EventEmitter {
         if (timer) {
             clearInterval(timer);
             this.heartbeatTimers.delete(vmId);
+        }
+    }
+    /**
+     * Start polling for delegated tasks from Master
+     */
+    startTaskPolling(vmId) {
+        if (!this.enableMasterRegistration)
+            return;
+        if (this.taskPollTimers.has(vmId))
+            return; // Already polling
+        const vm = this.get(vmId);
+        if (!vm?.tags.includes('coding-ready')) {
+            console.log(`[VMManager] VM ${vmId} not ready for task polling (needs bootstrap)`);
+            return;
+        }
+        const pollTimer = setInterval(async () => {
+            try {
+                // Check for pending tasks for this VPS
+                const response = await fetch(`${MOLTBOT_MASTER_URL}/vps/tasks/${vmId}`);
+                if (!response.ok)
+                    return;
+                const data = await response.json();
+                if (data.tasks && data.tasks.length > 0) {
+                    for (const task of data.tasks) {
+                        await this.executeDelegatedTask(vmId, task);
+                    }
+                }
+            }
+            catch {
+                // Ignore polling errors
+            }
+        }, TASK_POLL_INTERVAL_MS);
+        this.taskPollTimers.set(vmId, pollTimer);
+        console.log(`[VMManager] Started task polling for VM ${vmId}`);
+    }
+    /**
+     * Stop task polling for a VM
+     */
+    stopTaskPolling(vmId) {
+        const timer = this.taskPollTimers.get(vmId);
+        if (timer) {
+            clearInterval(timer);
+            this.taskPollTimers.delete(vmId);
+        }
+    }
+    /**
+     * Execute a delegated task on a VM using Claude Code CLI
+     */
+    async executeDelegatedTask(vmId, task) {
+        const entry = this.vms.get(vmId);
+        if (!entry)
+            return;
+        const { computer, meta: vm } = entry;
+        if (!computer?.interface)
+            return;
+        console.log(`[VMManager] Executing delegated task on VM ${vmId}: ${task.task.slice(0, 50)}...`);
+        vm.status = 'working';
+        vm.currentTask = task.task;
+        this.emit('task_delegated', { vmId, taskId: task.id, task: task.task });
+        try {
+            const iface = computer.interface;
+            // Open terminal
+            await iface.pressKey('ctrl+alt+t');
+            await this.delay(1500);
+            // Run Claude with the task
+            const escapedTask = task.task.replace(/'/g, "'\\''");
+            const claudeCmd = `claude -p '${escapedTask}' --yes 2>&1 | tee /tmp/task-${task.id}.log`;
+            await iface.typeText(claudeCmd);
+            await iface.pressKey('Return');
+            // Let Claude work (this is async - the task will complete in background)
+            // Report that we started the task
+            await fetch(`${MOLTBOT_MASTER_URL}/vps/update`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    taskId: task.id,
+                    vpsId: vmId,
+                    status: 'in_progress',
+                }),
+            });
+            this.emit('task_started', { vmId, taskId: task.id });
+        }
+        catch (error) {
+            console.error(`[VMManager] Failed to execute task on ${vmId}:`, error);
+            vm.status = 'error';
         }
     }
     /**

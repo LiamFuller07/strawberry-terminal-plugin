@@ -1,5 +1,12 @@
 import { EventEmitter } from 'events';
 import { VM, VMConfig, VMStatus, Screenshot, TaskResult, ComputerAction } from './types.js';
+interface DelegatedTask {
+    id: string;
+    task: string;
+    priority: string;
+    from: string;
+    timestamp: string;
+}
 /**
  * VMManager - Manages Real Windows/macOS/Linux VMs via TryCua Cloud
  *
@@ -9,6 +16,7 @@ import { VM, VMConfig, VMStatus, Screenshot, TaskResult, ComputerAction } from '
 export declare class VMManager extends EventEmitter {
     private vms;
     private heartbeatTimers;
+    private taskPollTimers;
     private maxVms;
     private apiKey;
     private enableMasterRegistration;
@@ -29,6 +37,18 @@ export declare class VMManager extends EventEmitter {
      * Stop heartbeat for a VM
      */
     private stopHeartbeat;
+    /**
+     * Start polling for delegated tasks from Master
+     */
+    startTaskPolling(vmId: string): void;
+    /**
+     * Stop task polling for a VM
+     */
+    stopTaskPolling(vmId: string): void;
+    /**
+     * Execute a delegated task on a VM using Claude Code CLI
+     */
+    executeDelegatedTask(vmId: string, task: DelegatedTask): Promise<void>;
     /**
      * Bootstrap a Linux VM for coding tasks
      * Installs Claude Code CLI and plugins via terminal commands
