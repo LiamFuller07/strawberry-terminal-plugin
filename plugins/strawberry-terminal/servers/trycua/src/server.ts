@@ -408,6 +408,24 @@ class TryCuaMCPServer {
             properties: {},
           },
         },
+        {
+          name: 'bootstrap_vm_for_coding',
+          description: 'Bootstrap a Linux VM for coding tasks. Installs Claude Code CLI, git, and registers with Moltbot Master. Use after spawn_vm to make the VM ready for coding delegation.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vm_id: {
+                type: 'string',
+                description: 'The VM ID to bootstrap',
+              },
+              anthropic_api_key: {
+                type: 'string',
+                description: 'Optional: Anthropic API key (uses env ANTHROPIC_API_KEY if not provided)',
+              },
+            },
+            required: ['vm_id'],
+          },
+        },
       ];
 
       return { tools };
@@ -979,6 +997,27 @@ class TryCuaMCPServer {
                     null,
                     2
                   ),
+                } as TextContent,
+              ],
+            };
+          }
+
+          case 'bootstrap_vm_for_coding': {
+            const vmId = args?.vm_id as string;
+            const apiKey = args?.anthropic_api_key as string | undefined;
+
+            writeEvent({ type: 'bootstrap', vm_id: vmId, status: 'starting' });
+
+            const result = await this.vmManager.bootstrapForCoding(vmId, apiKey);
+
+            writeEvent({ type: 'bootstrap', vm_id: vmId, status: result.success ? 'complete' : 'failed' });
+            updateVMStatus(this.vmManager);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(result, null, 2),
                 } as TextContent,
               ],
             };

@@ -30,6 +30,14 @@ export declare class VMManager extends EventEmitter {
      */
     private stopHeartbeat;
     /**
+     * Bootstrap a Linux VM for coding tasks
+     * Installs Claude Code CLI and plugins via terminal commands
+     */
+    bootstrapForCoding(vmId: string, anthropicApiKey?: string): Promise<{
+        success: boolean;
+        message: string;
+    }>;
+    /**
      * Map our OSType to TryCua's OSType enum
      */
     private mapOSType;

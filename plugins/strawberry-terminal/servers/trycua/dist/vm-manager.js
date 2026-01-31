@@ -132,6 +132,74 @@ export class VMManager extends EventEmitter {
         }
     }
     /**
+     * Bootstrap a Linux VM for coding tasks
+     * Installs Claude Code CLI and plugins via terminal commands
+     */
+    async bootstrapForCoding(vmId, anthropicApiKey) {
+        const entry = this.vms.get(vmId);
+        if (!entry) {
+            throw new Error(`VM ${vmId} not found`);
+        }
+        const { computer, meta: vm } = entry;
+        if (!computer || !computer.interface) {
+            throw new Error(`VM ${vmId} interface not ready`);
+        }
+        if (vm.osType !== 'linux') {
+            return { success: false, message: 'Bootstrap currently only supports Linux VMs' };
+        }
+        const apiKey = anthropicApiKey || process.env.ANTHROPIC_API_KEY;
+        if (!apiKey) {
+            return { success: false, message: 'ANTHROPIC_API_KEY required for bootstrap' };
+        }
+        console.log(`[VMManager] Bootstrapping VM ${vmId} for coding...`);
+        vm.status = 'working';
+        vm.currentTask = 'Installing Claude Code';
+        this.emit('vm_status', { vmId, status: 'bootstrapping' });
+        const iface = computer.interface;
+        try {
+            // Open terminal
+            await iface.pressKey('ctrl+alt+t');
+            await this.delay(2000);
+            // Install Node.js and Claude Code
+            const setupCommands = [
+                // Install Node.js if not present
+                'curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs',
+                // Install Claude Code
+                'npm install -g @anthropic-ai/claude-code@latest || npm install -g claude-code@latest',
+                // Set API key
+                `echo "export ANTHROPIC_API_KEY=${apiKey}" >> ~/.bashrc`,
+                `export ANTHROPIC_API_KEY=${apiKey}`,
+                // Create config
+                'mkdir -p ~/.config/claude && echo \'{"model":"claude-sonnet-4-20250514"}\' > ~/.config/claude/config.json',
+                // Configure git
+                `git config --global user.name "Moltbot VPS ${vmId.slice(0, 8)}"`,
+                `git config --global user.email "moltbot-${vmId.slice(0, 8)}@swarm.local"`,
+            ];
+            for (const cmd of setupCommands) {
+                await iface.typeText(cmd);
+                await iface.pressKey('Return');
+                await this.delay(3000); // Wait for command to complete
+            }
+            // Register with Master
+            const registerCmd = `curl -s -X POST "${MOLTBOT_MASTER_URL}/vps/register" -H "Content-Type: application/json" -d '{"id":"${vmId}","name":"VPS-${vmId.slice(0, 8)}","endpoint":"trycua","capabilities":["claude-code","git","coding"]}'`;
+            await iface.typeText(registerCmd);
+            await iface.pressKey('Return');
+            await this.delay(2000);
+            // Close terminal
+            await iface.pressKey('ctrl+d');
+            vm.status = 'ready';
+            vm.currentTask = undefined;
+            vm.tags.push('claude-code', 'coding-ready');
+            console.log(`[VMManager] VM ${vmId} bootstrapped for coding`);
+            this.emit('vm_bootstrapped', { vmId });
+            return { success: true, message: 'VM bootstrapped with Claude Code CLI' };
+        }
+        catch (error) {
+            vm.status = 'error';
+            return { success: false, message: `Bootstrap failed: ${error}` };
+        }
+    }
+    /**
      * Map our OSType to TryCua's OSType enum
      */
     mapOSType(osType) {
