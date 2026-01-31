@@ -6,6 +6,9 @@ import sharp from 'sharp';
 import { VM_SIZE_SPECS, } from './types.js';
 const API_BASE = process.env.CUA_API_BASE || 'https://api.cua.ai';
 const MAX_IMAGE_WIDTH = 1200; // Max width for screenshots to avoid API limits
+// Moltbot Master integration for VPS registration
+const MOLTBOT_MASTER_URL = process.env.MOLTBOT_MASTER_URL || 'https://moltbot-master.liam-939.workers.dev';
+const HEARTBEAT_INTERVAL_MS = 30000; // 30 seconds
 /**
  * Resize screenshot buffer to fit within API limits
  */
@@ -34,15 +37,98 @@ async function resizeScreenshot(buffer) {
  */
 export class VMManager extends EventEmitter {
     vms = new Map();
+    heartbeatTimers = new Map();
     maxVms;
     apiKey;
+    enableMasterRegistration;
     constructor(maxVms = 5) {
         super();
         this.maxVms = maxVms;
         this.apiKey = process.env.CUA_API_KEY || process.env.TRYCUA_API_KEY || '';
+        this.enableMasterRegistration = process.env.MOLTBOT_MASTER_REGISTRATION !== 'false';
         if (!this.apiKey) {
             console.error('[VMManager] Warning: No CUA_API_KEY - VM operations will fail');
             console.error('[VMManager] Get your API key at https://cua.ai');
+        }
+    }
+    /**
+     * Register a VM with Moltbot Master for orchestration
+     */
+    async registerWithMaster(vm) {
+        if (!this.enableMasterRegistration)
+            return;
+        try {
+            const response = await fetch(`${MOLTBOT_MASTER_URL}/vps/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: vm.id,
+                    name: vm.name,
+                    endpoint: `vm://${vm.id}`, // Virtual endpoint for MCP-based VMs
+                    capabilities: ['browser', 'compute', 'screenshot', vm.osType],
+                }),
+            });
+            if (response.ok) {
+                console.log(`[VMManager] Registered VM ${vm.name} with Moltbot Master`);
+                this.emit('master_registered', { vmId: vm.id, name: vm.name });
+            }
+            else {
+                console.error(`[VMManager] Failed to register with Master: ${response.status}`);
+            }
+        }
+        catch (error) {
+            console.error(`[VMManager] Master registration error:`, error);
+        }
+    }
+    /**
+     * Send heartbeat to Moltbot Master
+     */
+    async sendHeartbeat(vmId) {
+        if (!this.enableMasterRegistration)
+            return;
+        const vm = this.get(vmId);
+        if (!vm)
+            return;
+        try {
+            await fetch(`${MOLTBOT_MASTER_URL}/vps/heartbeat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: vm.id,
+                    status: vm.status === 'working' ? 'busy' : 'online',
+                    currentTask: vm.currentTask,
+                }),
+            });
+        }
+        catch (error) {
+            // Silently fail - heartbeat is best-effort
+            console.error(`[VMManager] Heartbeat error for ${vmId}:`, error);
+        }
+    }
+    /**
+     * Start periodic heartbeat for a VM
+     */
+    startHeartbeat(vmId) {
+        if (!this.enableMasterRegistration)
+            return;
+        // Clear existing heartbeat if any
+        if (this.heartbeatTimers.has(vmId)) {
+            clearInterval(this.heartbeatTimers.get(vmId));
+        }
+        // Send immediate heartbeat
+        this.sendHeartbeat(vmId);
+        // Set up periodic heartbeat
+        const timer = setInterval(() => this.sendHeartbeat(vmId), HEARTBEAT_INTERVAL_MS);
+        this.heartbeatTimers.set(vmId, timer);
+    }
+    /**
+     * Stop heartbeat for a VM
+     */
+    stopHeartbeat(vmId) {
+        const timer = this.heartbeatTimers.get(vmId);
+        if (timer) {
+            clearInterval(timer);
+            this.heartbeatTimers.delete(vmId);
         }
     }
     /**
@@ -149,6 +235,9 @@ export class VMManager extends EventEmitter {
             vm.status = 'ready';
             this.emit('vm_ready', { vmId: id });
             console.log(`[VMManager] VM "${provision.name}" (${osType}) is ready`);
+            // Register with Moltbot Master and start heartbeat
+            await this.registerWithMaster(vm);
+            this.startHeartbeat(id);
             return vm;
         }
         catch (error) {
@@ -534,6 +623,21 @@ export class VMManager extends EventEmitter {
         if (!entry)
             return;
         const { computer, meta: vm, cloudName } = entry;
+        // Stop heartbeat
+        this.stopHeartbeat(vmId);
+        // Send offline status to Master
+        if (this.enableMasterRegistration) {
+            try {
+                await fetch(`${MOLTBOT_MASTER_URL}/vps/heartbeat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: vmId, status: 'offline' }),
+                });
+            }
+            catch {
+                // Ignore - VM is stopping anyway
+            }
+        }
         // Disconnect SDK
         try {
             if (computer) {
@@ -556,6 +660,11 @@ export class VMManager extends EventEmitter {
      * Stop all VMs
      */
     async stopAll() {
+        // Clear all heartbeat timers first
+        for (const timer of this.heartbeatTimers.values()) {
+            clearInterval(timer);
+        }
+        this.heartbeatTimers.clear();
         const stopPromises = Array.from(this.vms.keys()).map((id) => this.stop(id));
         await Promise.all(stopPromises);
     }

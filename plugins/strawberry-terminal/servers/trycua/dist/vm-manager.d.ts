@@ -8,9 +8,27 @@ import { VM, VMConfig, VMStatus, Screenshot, TaskResult, ComputerAction } from '
  */
 export declare class VMManager extends EventEmitter {
     private vms;
+    private heartbeatTimers;
     private maxVms;
     private apiKey;
+    private enableMasterRegistration;
     constructor(maxVms?: number);
+    /**
+     * Register a VM with Moltbot Master for orchestration
+     */
+    private registerWithMaster;
+    /**
+     * Send heartbeat to Moltbot Master
+     */
+    private sendHeartbeat;
+    /**
+     * Start periodic heartbeat for a VM
+     */
+    private startHeartbeat;
+    /**
+     * Stop heartbeat for a VM
+     */
+    private stopHeartbeat;
     /**
      * Map our OSType to TryCua's OSType enum
      */
