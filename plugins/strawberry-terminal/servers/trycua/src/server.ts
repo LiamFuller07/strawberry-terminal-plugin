@@ -20,10 +20,17 @@ const VM_STATUS_FILE = '/tmp/bat-vm-status.json';
 const VM_SCREENSHOTS_DIR = '/tmp/strawberry-vm-screenshots';
 const DEFAULT_STREAM_INTERVAL_MS = 400;
 
+// Disable VM UI features (screenshots, status) by default
+// Set STRAWBERRY_VM_UI=1 to enable
+const VM_UI_ENABLED = process.env.STRAWBERRY_VM_UI === '1';
+
 /**
  * Write event for sidebar tracking
+ * Only writes if STRAWBERRY_VM_UI=1 is set
  */
 function writeEvent(event: Record<string, unknown>): void {
+  if (!VM_UI_ENABLED) return;
+
   try {
     const line = JSON.stringify({ ...event, timestamp: new Date().toISOString() }) + '\n';
     fs.appendFileSync(MCP_EVENTS_FILE, line);
@@ -34,8 +41,11 @@ function writeEvent(event: Record<string, unknown>): void {
 
 /**
  * Save VM screenshot for Strawberry TUI viewer
+ * Only saves if STRAWBERRY_VM_UI=1 is set
  */
 function saveVMScreenshot(vmId: string, vmName: string, imageB64: string, lastAction?: string): void {
+  if (!VM_UI_ENABLED) return;
+
   try {
     // Ensure directory exists
     if (!fs.existsSync(VM_SCREENSHOTS_DIR)) {
@@ -61,8 +71,11 @@ function saveVMScreenshot(vmId: string, vmName: string, imageB64: string, lastAc
 
 /**
  * Update VM status file for sidebar
+ * Only updates if STRAWBERRY_VM_UI=1 is set
  */
 function updateVMStatus(vmManager: VMManager): void {
+  if (!VM_UI_ENABLED) return;
+
   try {
     const vms = vmManager.getAll().map(vm => ({
       id: vm.id,

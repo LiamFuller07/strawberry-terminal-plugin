@@ -20,5 +20,17 @@
       "keywords": ["strawberry", "terminal", "vm", "browser", "automation", "trycua", "computer-use"],
       "category": "automation"
     }
+    ,
+    {
+      "name": "windows-mcp",
+      "source": "./plugins/windows-mcp",
+      "description": "Connect an existing Windows-MCP instance (RDP + Windows MCP) to the Strawberry terminal sidebar and tasks",
+      "version": "0.1.0",
+      "author": {
+        "name": "CursorTouch"
+      },
+      "keywords": ["windows", "mcp", "rdp", "automation", "computer-use"],
+      "category": "automation"
+    }
   ]
 }

@@ -16,5 +16,10 @@
     "command": "node",
     "args": ["${CLAUDE_PLUGIN_ROOT}/servers/bootstrap.mjs", "local-computer-use"],
     "env": {}
+  },
+  "clawdbot": {
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/servers/bootstrap.mjs", "clawdbot"],
+    "env": {}
   }
 }

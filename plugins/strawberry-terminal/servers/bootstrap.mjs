@@ -31,6 +31,12 @@ const serverMap = {
     pluginDir: 'local-computer-use',
     pluginEntry: 'mcp-server.js',
   },
+  'clawdbot': {
+    packageDir: 'clawdbot-mcp',
+    entry: 'dist/server.js',
+    pluginDir: 'clawdbot',
+    pluginEntry: 'dist/server.js',
+  },
 };
 
 const config = serverMap[serverName];
