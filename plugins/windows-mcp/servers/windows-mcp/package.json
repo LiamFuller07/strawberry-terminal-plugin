@@ -1,0 +1,14 @@
+{
+  "name": "windows-mcp-wrapper",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Windows-MCP streaming wrapper for Strawberry Terminal",
+  "main": "mcp-wrapper.mjs",
+  "scripts": {
+    "start": "node mcp-wrapper.mjs",
+    "dev": "node --watch mcp-wrapper.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

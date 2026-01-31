@@ -1,0 +1,12 @@
+{
+  "windows-mcp": {
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/plugins/windows-mcp/servers/windows-mcp/bootstrap.mjs"],
+    "env": {
+      "WINDOWS_MCP_ENDPOINT": "${WINDOWS_MCP_ENDPOINT}",
+      "WINDOWS_MCP_VM_NAME": "${WINDOWS_MCP_VM_NAME}",
+      "GCP_PROJECT_ID": "${GCP_PROJECT_ID}",
+      "GCP_ZONE": "${GCP_ZONE}"
+    }
+  }
+}

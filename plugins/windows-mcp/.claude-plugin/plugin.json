@@ -1,0 +1,11 @@
+{
+  "name": "windows-mcp",
+  "version": "0.1.0",
+  "description": "Connect Windows MCP endpoints to Claude through Strawberry Terminal.",
+  "author": {
+    "name": "CursorTouch",
+    "url": "https://github.com/CursorTouch"
+  },
+  "repository": "https://github.com/CursorTouch/Windows-MCP",
+  "keywords": ["windows", "automation", "rdp", "computer-use", "mcp"]
+}
